@@ -25,15 +25,15 @@ class DWGAutoFillGUI:
     def __init__(self):
         self.io_manager = IOManager()
         self.mapper = Mapper()
-        self.filler = Filler()
+        self.autocad_bridge = AutoCADBridge()
         self.renderer = Renderer()
         self.highlighter = Highlighter()
         
         self.current_doc = None
         self.current_data_df = None
         self.current_mapping = {}
-        self.changed_entities = []
-        self.is_autocad_pro_mode = False # Будет определено позже в autocad_bridge
+        self.exporter = Exporter(self.io_manager, self.autocad_bridge)
+        self.is_autocad_pro_mode = self.autocad_bridge.is_available
         
         # Настройка темы PySimpleGUI
         sg.theme('LightBlue')
@@ -176,7 +176,7 @@ class DWGAutoFillGUI:
         
     def _export_pdf(self) -> None:
         """Экспорт в PDF (заглушка)."""
-        if self.is_autocad_pro_mode:
+        if self.window['-AUTOCAD_PRO-'].get():
             self._log("Экспорт PDF через AutoCAD COM (PRO-режим)...", 'INFO')
             # Здесь будет вызов autocad_bridge
         else:
@@ -213,7 +213,7 @@ class DWGAutoFillGUI:
             [sg.Button('Preview (1-я строка)', key='-PREVIEW-', size=(15, 1)), 
              sg.Button('Generate (Batch)', key='-GENERATE-', size=(15, 1))],
             [sg.HorizontalSeparator()],
-            [sg.Checkbox('Использовать AutoCAD (PRO-режим)', key='-AUTOCAD_PRO-', default=False, disabled=True, enable_events=True)],
+            [sg.Checkbox('Использовать AutoCAD (PRO-режим)', key='-AUTOCAD_PRO-', default=self.is_autocad_pro_mode, disabled=not self.is_autocad_pro_mode, enable_events=True)],
             [sg.Button('Экспорт PDF', key='-EXPORT_PDF-', size=(15, 1)), 
              sg.Button('Сохранить PNG', key='-SAVE_PNG-', size=(15, 1))]
         ]
