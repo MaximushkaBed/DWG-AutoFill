@@ -1,0 +1,12 @@
+# Core dependencies
+ezdxf
+matplotlib
+pandas
+openpyxl
+rapidfuzz
+Pillow
+PySimpleGUI # Or PyQt5, but starting with PySimpleGUI for MVP
+# pywin32 # For Windows/AutoCAD COM integration (Windows-only)
+
+# Packaging
+pyinstaller
