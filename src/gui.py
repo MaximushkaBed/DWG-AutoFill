@@ -3,12 +3,16 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os
 from typing import Dict, Any, List
+import pandas as pd
 
 # Импорт модулей
 from .io_manager import IOManager
 from .mapper import Mapper
 from .filler import Filler
 from .renderer import Renderer, Highlighter
+from .exporter import Exporter
+from .autocad_bridge import AutoCADBridge
+from .logger import logger
 
 # --- Константы ---
 CANVAS_KEY = '-CANVAS-'
@@ -25,14 +29,16 @@ class DWGAutoFillGUI:
     def __init__(self):
         self.io_manager = IOManager()
         self.mapper = Mapper()
+        self.filler = Filler()
         self.autocad_bridge = AutoCADBridge()
         self.renderer = Renderer()
         self.highlighter = Highlighter()
+        self.exporter = Exporter(self.io_manager, self.autocad_bridge)
         
         self.current_doc = None
         self.current_data_df = None
         self.current_mapping = {}
-        self.exporter = Exporter(self.io_manager, self.autocad_bridge)
+        self.changed_entities = []
         self.is_autocad_pro_mode = self.autocad_bridge.is_available
         
         # Настройка темы PySimpleGUI
@@ -44,17 +50,6 @@ class DWGAutoFillGUI:
         figure_canvas_agg.draw()
         figure_canvas_agg.get_tk_widget().pack(side='top', fill='both', expand=1)
         return figure_canvas_agg
-
-    def _log(self, message: str, level: str = 'INFO') -> None:
-        """Простая функция логирования в Multiline элемент."""
-        log_element = self.window[LOG_KEY]
-        color = 'black'
-        if level == 'ERROR':
-            color = 'red'
-        elif level == 'WARNING':
-            color = 'orange'
-        
-        log_element.print(f"[{level}] {message}", text_color=color)
 
     def _update_mapping_table(self, mapping: Dict[str, str], df_columns: List[str], dxf_attributes: List[str]) -> None:
         """Обновляет таблицу сопоставления в GUI."""
@@ -79,7 +74,7 @@ class DWGAutoFillGUI:
         try:
             self.current_doc = self.io_manager.load_dwg(path)
             self.window[DWG_PATH_KEY].update(path)
-            self._log(f"Шаблон DWG/DXF загружен: {os.path.basename(path)}")
+            logger.info(f"Шаблон DWG/DXF загружен: {os.path.basename(path)}")
             
             # Извлекаем атрибуты для маппинга
             dxf_attributes_dict = self.io_manager.get_dxf_attributes(self.current_doc)
@@ -89,7 +84,7 @@ class DWGAutoFillGUI:
             if self.current_data_df is not None:
                 self.current_mapping = self.mapper.auto_map(self.current_data_df.columns.tolist(), dxf_attributes)
                 self._update_mapping_table(self.current_mapping, self.current_data_df.columns.tolist(), dxf_attributes)
-                self._log(f"Авто-маппинг выполнен. Найдено {len(self.current_mapping)} совпадений.")
+                logger.info(f"Авто-маппинг выполнен. Найдено {len(self.current_mapping)} совпадений.")
             else:
                 self._update_mapping_table({}, [], dxf_attributes)
                 
@@ -98,14 +93,15 @@ class DWGAutoFillGUI:
             
         except Exception as e:
             self.current_doc = None
-            self._log(f"Ошибка загрузки DWG: {e}", 'ERROR')
+            logger.error(f"Ошибка загрузки DWG: {e}")
+            sg.popup_error(f"Ошибка загрузки DWG/DXF: {e}")
 
     def _load_data_file(self, path: str) -> None:
         """Загружает файл данных (Excel/CSV/JSON)."""
         try:
             self.current_data_df = self.io_manager.read_table(path)
             self.window[DATA_PATH_KEY].update(path)
-            self._log(f"Файл данных загружен: {os.path.basename(path)}. Строк: {len(self.current_data_df)}")
+            logger.info(f"Файл данных загружен: {os.path.basename(path)}. Строк: {len(self.current_data_df)}")
             
             # Если DWG уже загружен, делаем авто-маппинг
             if self.current_doc is not None:
@@ -113,24 +109,25 @@ class DWGAutoFillGUI:
                 dxf_attributes = list(dxf_attributes_dict.keys())
                 self.current_mapping = self.mapper.auto_map(self.current_data_df.columns.tolist(), dxf_attributes)
                 self._update_mapping_table(self.current_mapping, self.current_data_df.columns.tolist(), dxf_attributes)
-                self._log(f"Авто-маппинг выполнен. Найдено {len(self.current_mapping)} совпадений.")
+                logger.info(f"Авто-маппинг выполнен. Найдено {len(self.current_mapping)} совпадений.")
                 
         except Exception as e:
             self.current_data_df = None
-            self._log(f"Ошибка загрузки данных: {e}", 'ERROR')
+            logger.error(f"Ошибка загрузки данных: {e}")
+            sg.popup_error(f"Ошибка загрузки данных: {e}")
 
     def _preview_document(self) -> None:
         """Предпросмотр первого документа с заполненными данными."""
         if not self.current_doc or self.current_data_df is None or not self.current_mapping:
-            self._log("Необходимо загрузить DWG, данные и настроить маппинг.", 'WARNING')
+            logger.warning("Невозможно выполнить предпросмотр: не загружен DWG, данные или маппинг.")
+            sg.popup_quick_message("Необходимо загрузить DWG, данные и настроить маппинг.", background_color='red', text_color='white')
             return
         
         try:
             # Берем первую строку для предпросмотра
             first_row = self.current_data_df.iloc[0].to_dict()
             
-            # Создаем копию документа для заполнения (в реальном приложении нужно перезагружать)
-            # Здесь мы просто перезагружаем, чтобы избежать проблем с ezdxf
+            # Создаем копию документа для заполнения (перезагружаем)
             temp_doc = self.io_manager.load_dwg(self.window[DWG_PATH_KEY].get())
             
             # Заполняем
@@ -144,43 +141,139 @@ class DWGAutoFillGUI:
             self.highlighter.overlay_on_axes(self.renderer.ax, bboxes)
             self.window[HIGHLIGHT_TOGGLE_KEY].update(value=True)
             
-            self._log(f"Предпросмотр выполнен. Изменено {len(self.changed_entities)} полей.")
+            logger.info(f"Предпросмотр выполнен. Изменено {len(self.changed_entities)} полей.")
             
         except Exception as e:
-            self._log(f"Ошибка при предпросмотре: {e}", 'ERROR')
+            logger.error(f"Ошибка при предпросмотре: {e}")
+            sg.popup_error(f"Ошибка при предпросмотре: {e}")
 
     def _generate_documents(self) -> None:
         """Запуск пакетной генерации."""
         if not self.current_doc or self.current_data_df is None or not self.current_mapping:
-            self._log("Необходимо загрузить DWG, данные и настроить маппинг.", 'WARNING')
+            logger.warning("Невозможно выполнить генерацию: не загружен DWG, данные или маппинг.")
+            sg.popup_quick_message("Необходимо загрузить DWG, данные и настроить маппинг.", background_color='red', text_color='white')
             return
         
         output_folder = sg.popup_get_folder('Выберите папку для сохранения результатов', default_path=os.getcwd())
         if not output_folder:
             return
         
-        self._log(f"Начало пакетной генерации в папку: {output_folder}")
+        logger.info(f"Начало пакетной генерации в папку: {output_folder}")
         
-        # В реальном приложении здесь будет использоваться filler.batch_fill
-        # Но для MVP мы просто имитируем процесс
+        # Используем filler.batch_fill с полным отчетом
+        report = self.filler.batch_fill(self.window[DWG_PATH_KEY].get(), self.current_data_df, self.current_mapping, output_folder, self.io_manager)
         
-        total_rows = len(self.current_data_df)
-        success_count = 0
-        
-        for i in range(total_rows):
-            # Имитация работы
-            self._log(f"Обработка строки {i+1}/{total_rows}...", 'INFO')
-            success_count += 1
-            
-        self._log(f"Генерация завершена. Успешно создано {success_count} из {total_rows} файлов.", 'INFO')
-        
+        logger.info(f"Пакетная генерация завершена. Успешно создано {report['success_count']} из {report['total_rows']} файлов. Ошибок: {report['failed_count']}.")
+        sg.popup_ok(f"Пакетная генерация завершена.\nУспешно: {report['success_count']}\nОшибок: {report['failed_count']}", title="Генерация завершена")
+
     def _export_pdf(self) -> None:
-        """Экспорт в PDF (заглушка)."""
-        if self.window['-AUTOCAD_PRO-'].get():
-            self._log("Экспорт PDF через AutoCAD COM (PRO-режим)...", 'INFO')
-            # Здесь будет вызов autocad_bridge
-        else:
-            self._log("Экспорт PDF недоступен (требуется AutoCAD). Используйте PNG-превью.", 'WARNING')
+        """Экспорт в PDF с использованием Exporter."""
+        if not self.current_doc:
+            logger.warning("Невозможно экспортировать: не загружен DWG.")
+            sg.popup_quick_message("Сначала загрузите DWG/DXF шаблон.", background_color='red', text_color='white')
+            return
+        
+        pdf_path = sg.popup_get_file('Сохранить как PDF', save_as=True, file_types=(("PDF Files", "*.pdf"),))
+        if not pdf_path:
+            return
+            
+        dwg_path = self.window[DWG_PATH_KEY].get()
+        
+        try:
+            if self.window['-AUTOCAD_PRO-'].get():
+                logger.info("Запуск экспорта PDF через AutoCAD COM (PRO-режим)...")
+                if self.exporter.export_pdf(dwg_path, pdf_path):
+                    logger.info(f"PDF успешно экспортирован через AutoCAD: {pdf_path}")
+                    sg.popup_ok(f"PDF успешно экспортирован: {pdf_path}")
+                else:
+                    logger.error("Экспорт PDF через AutoCAD COM завершился неудачей.")
+                    sg.popup_error("Экспорт PDF через AutoCAD COM завершился неудачей. Проверьте логи.")
+            else:
+                logger.warning("Экспорт PDF недоступен (требуется AutoCAD).")
+                sg.popup_ok("Экспорт PDF недоступен. Используйте PNG-превью.")
+        except Exception as e:
+            logger.error(f"Критическая ошибка при экспорте PDF: {e}")
+            sg.popup_error(f"Критическая ошибка при экспорте PDF: {e}")
+
+    def _show_manual_mapping_window(self):
+        """Показывает окно ручного сопоставления."""
+        if self.current_data_df is None or self.current_doc is None:
+            sg.popup_quick_message("Сначала загрузите DWG и данные.", background_color='red', text_color='white')
+            return
+
+        df_columns = self.current_data_df.columns.tolist()
+        dxf_attributes = list(self.io_manager.get_dxf_attributes(self.current_doc).keys())
+        
+        # Создаем список для ComboBox: [колонка_данных, атрибут_dwg]
+        mapping_rows = []
+        for col in df_columns:
+            mapped_attr = self.current_mapping.get(col, '')
+            mapping_rows.append([col, mapped_attr])
+
+        # Создаем ComboBox с атрибутами DWG для выбора
+        dxf_options = [''] + dxf_attributes
+
+        # Layout для ручного маппинга
+        manual_map_layout = [
+            [sg.Text('Ручное сопоставление полей', font=('Helvetica', 14))],\
+            [sg.HorizontalSeparator()],
+            [sg.Table(values=mapping_rows,
+                      headings=['Колонка данных', 'Сопоставленный атрибут DWG'],
+                      key='-MANUAL_TABLE-', 
+                      auto_size_columns=False,
+                      col_widths=[20, 20],
+                      justification='left',
+                      num_rows=min(20, len(df_columns) + 2),
+                      display_row_numbers=False,
+                      enable_events=True,
+                      select_mode=sg.TABLE_SELECT_MODE_BROWSE)],
+            [sg.Text('Выбранная колонка:', size=(15, 1)), sg.Input(key='-SELECTED_COL-', disabled=True, size=(20, 1))],
+            [sg.Text('Выбрать атрибут:', size=(15, 1)), sg.Combo(dxf_options, key='-ATTR_COMBO-', enable_events=True, size=(20, 1))],
+            [sg.HorizontalSeparator()],
+            [sg.Button('Сохранить', key='-SAVE_MANUAL_MAP-'), sg.Button('Отмена')]
+        ]
+
+        window = sg.Window('Ручное сопоставление', manual_map_layout, modal=True, finalize=True)
+        selected_row_index = -1
+
+        while True:
+            event, values = window.read()
+            if event == sg.WIN_CLOSED or event == 'Отмена':
+                break
+            
+            if event == '-MANUAL_TABLE-':
+                if values['-MANUAL_TABLE-']:
+                    selected_row_index = values['-MANUAL_TABLE-'][0]
+                    selected_col = mapping_rows[selected_row_index][0]
+                    selected_attr = mapping_rows[selected_row_index][1]
+                    window['-SELECTED_COL-'].update(selected_col)
+                    window['-ATTR_COMBO-'].update(value=selected_attr)
+                
+            elif event == '-ATTR_COMBO-':
+                if selected_row_index != -1:
+                    new_attr = values['-ATTR_COMBO-']
+                    col_to_map = mapping_rows[selected_row_index][0]
+                    
+                    # Обновляем локальную таблицу
+                    mapping_rows[selected_row_index][1] = new_attr
+                    window['-MANUAL_TABLE-'].update(values=mapping_rows)
+                    
+                    # Обновляем ComboBox, чтобы он показывал новое значение
+                    window['-ATTR_COMBO-'].update(value=new_attr)
+
+            elif event == '-SAVE_MANUAL_MAP-':
+                # Собираем новое сопоставление
+                new_mapping = {}
+                for col, attr in mapping_rows:
+                    if attr:
+                        new_mapping[col] = attr
+                
+                self.current_mapping = new_mapping
+                self._update_mapping_table(self.current_mapping, df_columns, dxf_attributes)
+                logger.info(f"Ручное сопоставление сохранено. Всего сопоставлено: {len(new_mapping)}")
+                break
+
+        window.close()
 
     def run(self):
         """Запуск основного цикла GUI."""
@@ -207,7 +300,7 @@ class DWGAutoFillGUI:
                           num_rows=10,
                           display_row_numbers=False,
                           enable_events=True)],
-                [sg.Button('Ручной Маппинг', key='-MANUAL_MAP-', disabled=True)]
+                [sg.Button('Ручной Маппинг', key='-MANUAL_MAP-', disabled=False)]
             ])],
             [sg.HorizontalSeparator()],
             [sg.Button('Preview (1-я строка)', key='-PREVIEW-', size=(15, 1)), 
@@ -272,17 +365,30 @@ class DWGAutoFillGUI:
                 self.highlighter.toggle_highlights(values[HIGHLIGHT_TOGGLE_KEY])
                 self.renderer.canvas.draw_idle()
             elif event == '-SAVE_PNG-':
+                if not self.renderer.fig:
+                    sg.popup_quick_message("Сначала загрузите DWG/DXF шаблон.", background_color='red', text_color='white')
+                    continue
                 # Сохранение PNG (просто сохраняем текущий Matplotlib Figure)
                 save_path = sg.popup_get_file('Сохранить предпросмотр как PNG', save_as=True, file_types=(("PNG Files", "*.png"),))
                 if save_path:
                     self.renderer.fig.savefig(save_path, dpi=300)
-                    self._log(f"Предпросмотр сохранен в {save_path}")
+                    logger.info(f"Предпросмотр сохранен в {save_path}")
+                    sg.popup_ok(f"PNG сохранен: {save_path}")
+            elif event == '-AUTOCAD_PRO-':
+                # Логика для PRO-режима (пока только логирование)
+                if values['-AUTOCAD_PRO-']:
+                    logger.info("PRO-режим (AutoCAD COM) активирован.")
+                else:
+                    logger.info("PRO-режим (AutoCAD COM) деактивирован.")
+            elif event == '-MANUAL_MAP-':
+                self._show_manual_mapping_window()
             
         self.window.close()
+        self.autocad_bridge.close_app() # Закрываем COM-объект при выходе
 
 # Обновление src/__init__.py
-with open(os.path.join(os.path.dirname(__file__), '__init__.py'), 'a') as f:
-    f.write('from .gui import DWGAutoFillGUI\n')
+# with open(os.path.join(os.path.dirname(__file__), '__init__.py'), 'a') as f:
+#     f.write('from .gui import DWGAutoFillGUI\n')
 
 if __name__ == '__main__':
     # Для запуска GUI
