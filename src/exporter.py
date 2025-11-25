@@ -1,3 +1,4 @@
+import os
 from ezdxf.document import Drawing
 from typing import Optional
 from .autocad_bridge import AutoCADBridge
